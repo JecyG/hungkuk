@@ -5,8 +5,8 @@ import (
 )
 
 type (
-	Client interface {
-		SetBasicAuth(username, password string) Client
+	RESTClient interface {
+		SetBasicAuth(username, password string) RESTClient
 		Post() Request
 		Put() Request
 		Get() Request
@@ -22,7 +22,7 @@ type (
 	}
 )
 
-func NewClient(client *http.Client, baseURL string) Client {
+func NewClient(client *http.Client, baseURL string) RESTClient {
 	return &restClient{
 		client:  client,
 		baseURL: baseURL,
@@ -49,7 +49,7 @@ func (rc *restClient) Patch() Request {
 	return rc.method(http.MethodPatch)
 }
 
-func (rc *restClient) SetBasicAuth(username, password string) Client {
+func (rc *restClient) SetBasicAuth(username, password string) RESTClient {
 	rc.username = username
 	rc.password = password
 	return rc

@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
 )
 
 type (
 	Result interface {
+		StatusCode(statusCode *int) Result
 		Into(obj interface{}) error
 	}
 
@@ -16,24 +16,30 @@ type (
 		body       []byte
 		err        error
 		statusCode int
-		status     string
 	}
 )
+
+func (r *result) StatusCode(statusCode *int) Result {
+	if statusCode != nil {
+		statusCode = &r.statusCode
+	}
+
+	return r
+}
 
 func (r *result) Into(obj interface{}) error {
 	if r.err != nil {
 		return r.err
 	}
 
-	if r.statusCode != http.StatusOK {
-		return fmt.Errorf("http response with status: %s", r.status)
-	}
-
 	if obj != nil {
-		d := json.NewDecoder(bytes.NewReader(r.body))
-		err := d.Decode(obj)
+		if len(r.body) == 0 {
+			return fmt.Errorf("empty response body with status code: %d", r.statusCode)
+		}
+
+		err := json.NewDecoder(bytes.NewReader(r.body)).Decode(obj)
 		if err != nil {
-			return fmt.Errorf("http response body decode error: %v, raw data: %s", err, string(r.body))
+			return fmt.Errorf("decode response body error: %v", err)
 		}
 	}
 

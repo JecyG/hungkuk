@@ -17,11 +17,6 @@ import (
 	"time"
 )
 
-const (
-	maxRetries    = 3                     // 最大重试次数
-	retryInterval = 20 * time.Millisecond // 重试时间间隔
-)
-
 type (
 	Request interface {
 		WithParam(name, value string) Request
@@ -29,25 +24,29 @@ type (
 		WithHeader(header http.Header) Request
 		WithContext(ctx context.Context) Request
 		WithTimeout(d time.Duration) Request
+		WithMaxRetry(count int) Request
+		WithRetryInterval(d time.Duration) Request
 		SubResourcef(subPath string, args ...interface{}) Request
 		Body(body interface{}) Request
 		Do() Result
 	}
 
 	request struct {
-		client      *http.Client
-		method      string
-		params      url.Values
-		header      http.Header
-		body        []byte
-		ctx         context.Context
-		baseURL     string
-		subPath     string
-		subPathArgs []interface{}
-		timeout     time.Duration
-		username    string
-		password    string
-		err         error
+		client        *http.Client
+		method        string
+		params        url.Values
+		header        http.Header
+		body          []byte
+		ctx           context.Context
+		baseURL       string
+		subPath       string
+		subPathArgs   []interface{}
+		retryCount    int
+		retryInterval time.Duration
+		timeout       time.Duration
+		username      string
+		password      string
+		err           error
 	}
 )
 
@@ -95,6 +94,16 @@ func (r *request) WithContext(ctx context.Context) Request {
 
 func (r *request) WithTimeout(d time.Duration) Request {
 	r.timeout = d
+	return r
+}
+
+func (r *request) WithMaxRetry(count int) Request {
+	r.retryCount = count
+	return r
+}
+
+func (r *request) WithRetryInterval(d time.Duration) Request {
+	r.retryInterval = d
 	return r
 }
 
@@ -162,78 +171,98 @@ func (r *request) wrapURL() *url.URL {
 
 func (r *request) Do() Result {
 	rt := &result{}
-
 	if r.err != nil {
 		rt.err = r.err
 		return rt
 	}
+
+	retry := false
+	rt, retry = r.tryOnce()
+	if !retry {
+		return rt
+	}
+
+	for try := 0; try < r.retryCount; try++ {
+		rt, retry = r.tryOnce()
+		if !retry {
+			return rt
+		}
+	}
+
+	rt.err = errors.New("unexpected error")
+
+	return rt
+}
+
+func (r *request) tryOnce() (*result, bool) {
+	rt := &result{}
+	u := r.wrapURL().String()
+	req, err := http.NewRequest(r.method, u, bytes.NewReader(r.body))
+	if err != nil {
+		rt.err = err
+		return rt, false
+	}
+
+	if r.timeout > 0 {
+		if r.ctx == nil {
+			r.ctx = context.Background()
+		}
+
+		var cancelFn context.CancelFunc
+		r.ctx, cancelFn = context.WithTimeout(r.ctx, r.timeout)
+		defer cancelFn()
+	}
+
+	if r.ctx != nil {
+		req = req.WithContext(r.ctx)
+	}
+
+	req.Header = r.header.Clone()
+	if len(req.Header) == 0 {
+		req.Header = make(http.Header)
+	}
+
+	req.Header.Del("Accept-Encoding")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Charset", "utf-8")
+
+	req.SetBasicAuth(r.username, r.password)
 
 	client := r.client
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	for try := 0; try < maxRetries; try++ {
-		u := r.wrapURL().String()
-		req, err := http.NewRequest(r.method, u, bytes.NewReader(r.body))
-		if err != nil {
+	resp, err := client.Do(req)
+	if err != nil {
+		if !isConnectionReset(err) || r.method != http.MethodGet {
 			rt.err = err
-			return rt
+			return rt, false
 		}
 
-		if r.ctx != nil {
-			req.WithContext(r.ctx)
-		}
-
-		req.Header = r.header.Clone()
-		if len(req.Header) == 0 {
-			req.Header = make(http.Header)
-		}
-
-		req.Header.Del("Accept-Encoding")
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Accept-Charset", "utf-8")
-
-		req.SetBasicAuth(r.username, r.password)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			if !isConnectionReset(err) || r.method != http.MethodGet {
-				rt.err = err
-				return rt
-			}
-
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		var body []byte
-		if resp.Body != nil {
-			data, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				if err == io.ErrUnexpectedEOF {
-					time.Sleep(retryInterval)
-					continue
-				}
-
-				rt.err = err
-				return rt
-			}
-
-			body = data
-		}
-
-		rt.body = body
-		rt.statusCode = resp.StatusCode
-		rt.status = resp.Status
-
-		return rt
+		return rt, true
 	}
 
-	rt.err = errors.New("unexpected error")
+	var body []byte
+	if resp.Body != nil {
+		data, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			if err == io.ErrUnexpectedEOF {
+				return rt, true
+			}
 
-	return rt
+			rt.err = err
+			return rt, false
+		}
+
+		body = data
+	}
+
+	rt.body = body
+	rt.statusCode = resp.StatusCode
+
+	return rt, false
 }
 
 func isConnectionReset(err error) bool {
